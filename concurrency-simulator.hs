@@ -1,4 +1,4 @@
-{-# LANGUAGE ExistentialQuantification, TypeFamilies, FlexibleInstances, FlexibleContexts #-}
+{-# LANGUAGE ExistentialQuantification, TypeFamilies, FlexibleInstances, FlexibleContexts, ScopedTypeVariables #-}
 
 import Prelude hiding (log, lookup, null)
 import Control.Monad.Trans.Free
@@ -13,12 +13,12 @@ import Data.Sequence (singleton, viewl, ViewL(..), (<|), (|>))
 import Data.IORef
 import qualified Data.Map.Strict as M
 import Control.Monad.Trans.Class
-import qualified Control.Monad.Trans.State as S
-import qualified Control.Monad.Trans.Writer as W
+import qualified Control.Monad.State as S
+import qualified Control.Monad.Writer as W
+import Data.Functor.Identity (Identity, runIdentity)
 import Data.Dynamic
-import Data.List (intercalate)
+import Data.List (intercalate, find)
 
-import Debug.Trace
 
 data ThreadF var next = forall a. Typeable a => CreateEmptyVar (var a -> next)
                       | forall a. Typeable a => CreateFullVar a (var a -> next)
@@ -39,7 +39,7 @@ instance Functor (ThreadF var) where
   fmap f (Fork cont1 cont2) = Fork (f cont1) (f cont2)
   fmap f End = End 
 
-type Thread m var a = FreeT (ThreadF var) m a
+type Thread m var = FreeT (ThreadF var) m
 
 createEmptyVar :: (Monad m, Typeable a) => Thread m var (var a)
 createEmptyVar = liftF (CreateEmptyVar id)
@@ -246,17 +246,29 @@ setValue binds var new = case M.lookup var binds of
                      (Just _, Nothing) -> M.adjust (\_ -> Nothing) var binds
                      (Just _, Just _) -> error "set of set variable"
 
-instance Monad m => MonadSharedState (S.StateT Bindings (W.WriterT [String] m)) where
-  type SVar (S.StateT Bindings (W.WriterT [String] m)) = Var
+-- type PureMonadTransformer m = S.StateT Bindings (W.WriterT [String] m)
+type PureMonadTransformer m = W.WriterT [String] (S.StateT Bindings m)
+type PureMonad = PureMonadTransformer Identity
+type PureThread = Thread PureMonad (SVar PureMonad)
+
+runPureMonadT :: Monad m => PureMonadTransformer m a -> m (a, [String])
+-- runPureMonadT act = W.runWriterT (S.evalStateT act emptyBindings)
+runPureMonadT act = S.evalStateT (W.runWriterT act) emptyBindings
+
+runPureMonad :: PureMonad a -> (a, [String])
+runPureMonad = runIdentity . runPureMonadT
+
+instance Monad m => MonadSharedState (PureMonadTransformer m) where
+  type SVar (PureMonadTransformer m) = Var
   newEmptySVar = S.get >>= \(Bindings map next) -> do
-        S.put (Bindings (M.insert next Nothing map) (next + 1))
-        return (Var next)
+    S.put (Bindings (M.insert next Nothing map) (next + 1))
+    return (Var next)
   newFullSVar val = S.get >>= \(Bindings map next) -> do
-        S.put (Bindings (M.insert next (Just (toDyn val)) map) (next + 1))
-        return (Var next)
+    S.put (Bindings (M.insert next (Just (toDyn val)) map) (next + 1))
+    return (Var next)
   readSVar (Var var) = S.gets (\(Bindings map _) -> getValue map var)
   writeSVar (Var var) val = S.modify (\(Bindings map next) -> Bindings (setValue map var val) next)
-  putLog str = lift (W.tell [str])
+  putLog str = W.tell [str]
 
 roundRobin :: MonadSharedState m => Thread m (SVar m) a -> m ()
 roundRobin t = go (singleton t)
@@ -396,31 +408,25 @@ runWithInterleaving fs maxSteps t = go fs maxSteps t [] M.empty
                   case wrappedChosen of
                     ErasedTypeThread chosen -> go fs' (maxSteps-1) chosen rest blocked'
 
-type PureInnerMonad = S.StateT Bindings (W.Writer [String])
-type PureThread a = Thread PureInnerMonad (SVar PureInnerMonad) a
-              
 getResultAndLog :: PureThread a -> Interleaving -> Int -> (RunResult, [String])
-getResultAndLog prog interleaving limit = W.runWriter $
-                                          flip S.evalStateT emptyBindings $
+getResultAndLog prog interleaving limit = runPureMonad $ 
                                           runWithInterleaving interleaving limit prog
+
 
 printPhilResult f limit = do
   let (result, logs) = getResultAndLog (runPhil 5) (repeatS (Choice f)) limit
   putStrLn (intercalate "\n" logs)
   print result
-                                         
-              
-main = do
-  printPhilResult (\n -> max (n-2) 0) 1000
-  putStrLn ""
-  printPhilResult (\n -> max (n-1) 0) 1000
 
 choices lst = map (\n -> choose n lst) [0..length lst - 1]
 
 allPermutations []  = [[]]
 allPermutations lst = [x:ys | (x, xs) <- choices lst, ys <- allPermutations xs]
         
-runAllInterleavings :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m))) => Thread m (SVar m) a -> Int -> m [RunResult]
+runAllInterleavings :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m))) =>
+                       Thread m (SVar m) a ->
+                       Int ->
+                       m [RunResult]
 runAllInterleavings t maxSteps = go [wrapThread t] M.empty maxSteps
   where go :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m))) =>
               ThreadList m (SVar m) ->
@@ -440,7 +446,34 @@ runAllInterleavings t maxSteps = go [wrapThread t] M.empty maxSteps
 
 doesntDeadlock :: PureThread a -> Int -> Bool
 doesntDeadlock prog maxSteps = all (/= Deadlock) $ 
-                               fst $ 
-                               W.runWriter $ 
-                               flip S.evalStateT emptyBindings $
+                               fst $
+                               runPureMonad $
                                runAllInterleavings prog maxSteps
+
+type M = PureMonadTransformer []
+type T = Thread M (SVar M)
+type TL = ThreadList M (SVar M)
+type TM = BlockedMap M (SVar M)
+
+allRuns :: T a -> Int -> [(RunResult, [String])]
+allRuns t maxSteps = runPureMonadT $ go [wrapThread t] M.empty maxSteps
+  where go :: TL -> TM -> Int -> M RunResult
+        go ready blocked maxSteps = case maxSteps of
+          0 -> return LimitReached
+          _ -> case ready of
+            [] -> if M.null blocked then return AllExit else return Deadlock
+            _ -> do
+              (wrapedChosen, rest) <- (lift . lift) (choices ready)
+              case wrapedChosen of
+                ErasedTypeThread chosen -> do
+                  (ready', blocked') <- singleStep chosen rest blocked
+                  go ready' blocked' (maxSteps-1)
+
+findDeadlock :: T a -> Int -> Maybe [String]
+findDeadlock t maxSteps = fmap snd $ find ((== Deadlock) . fst) $ allRuns t maxSteps 
+
+main = do
+  printPhilResult (\n -> max (n-2) 0) 1000
+  putStrLn ""
+  printPhilResult (\n -> max (n-1) 0) 1000
+  print $ findDeadlock (runPhil 4) 20
