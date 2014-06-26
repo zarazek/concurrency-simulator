@@ -18,6 +18,7 @@ import qualified Control.Monad.Writer as W
 import Data.Functor.Identity (Identity, runIdentity)
 import Data.Dynamic
 import Data.List (intercalate, find)
+import Control.Parallel
 
 
 data ThreadF var next = forall a. Typeable a => CreateEmptyVar (var a -> next)
@@ -472,8 +473,25 @@ allRuns t maxSteps = runPureMonadT $ go [wrapThread t] M.empty maxSteps
 findDeadlock :: T a -> Int -> Maybe [String]
 findDeadlock t maxSteps = fmap snd $ find ((== Deadlock) . fst) $ allRuns t maxSteps 
 
+par2 :: (a -> b -> c) -> (a -> b -> c)
+par2 f x y = x `par` y `par` f x y
+
+parMap :: (a -> b) -> [a] -> [b]
+parMap _ []     = []
+parMap f (x:xs) = par2 (:) (f x) (parMap f xs)
+
+parFind :: (a -> Bool) -> [a] -> Maybe a
+parFind f xs = g pairs
+  where pairs = parMap (\x -> (f x, x)) xs
+        g [] = Nothing
+        g ((True, y):ys) = Just y
+        g ((False,_):ys) = g ys
+
+parFindDeadlock :: T a -> Int -> Maybe [String]
+parFindDeadlock t maxSteps = fmap snd $ parFind ((== Deadlock) . fst) $ allRuns t maxSteps
+
 main = do
   printPhilResult (\n -> max (n-2) 0) 1000
   putStrLn ""
   printPhilResult (\n -> max (n-1) 0) 1000
-  print $ findDeadlock (runPhil 4) 20
+  print $ parFindDeadlock (runPhil 4) 20
