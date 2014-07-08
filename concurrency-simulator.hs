@@ -1,14 +1,20 @@
-{-# LANGUAGE ExistentialQuantification, TypeFamilies, FlexibleInstances, FlexibleContexts, ScopedTypeVariables #-}
+{-# LANGUAGE ExistentialQuantification, TypeFamilies, FlexibleInstances, FlexibleContexts, UndecidableInstances, ScopedTypeVariables #-}
+
+module Concurrency.Simulator (Thread, createEmptyVar, createFullVar, get, set, log, yield, fork,
+                              PureMonadTransformer, PureMonad, PureThread, runPureMonadT, runPureMonad,
+                              runIO, verboseRunIO,
+                              RunResult(..),
+                              Stream(..), Choice, Interleaving, runWithInterleaving,
+                              allRuns, findDeadlock) where
 
 import Prelude hiding (log, lookup, null)
 import Control.Monad.Trans.Free
-import Control.Monad (when, forever, replicateM, forM_, liftM)
+import Control.Monad (when)
 import Control.Monad.IO.Class
 import System.Random
 import Control.Concurrent (forkIO, myThreadId, threadDelay)
 import Control.Concurrent.MVar
 import Data.Typeable
-import Control.Monad.Trans.Cont
 import Data.Sequence (singleton, viewl, ViewL(..), (<|), (|>))
 import Data.IORef
 import qualified Data.Map.Strict as M
@@ -17,9 +23,9 @@ import qualified Control.Monad.State as S
 import qualified Control.Monad.Writer as W
 import Data.Functor.Identity (Identity, runIdentity)
 import Data.Dynamic
-import Data.List (intercalate, find)
-import Control.Parallel
+import Data.List (find)
 
+import Debug.Trace (trace)
 
 data ThreadF var next = forall a. Typeable a => CreateEmptyVar (var a -> next)
                       | forall a. Typeable a => CreateFullVar a (var a -> next)
@@ -38,7 +44,7 @@ instance Functor (ThreadF var) where
   fmap f (Yield cont) = Yield (f cont)
   fmap f (Log str cont) = Log str (f cont)
   fmap f (Fork cont1 cont2) = Fork (f cont1) (f cont2)
-  fmap f End = End 
+  fmap _ End = End 
 
 type Thread m var = FreeT (ThreadF var) m
 
@@ -70,54 +76,34 @@ fork :: (Monad m, Typeable a) => Thread m var a -> Thread m var ()
 fork thread = do
   child <- cFork
   when child $ do
-    thread
+    _ <- thread
     end
 
-swap :: (Monad m, Typeable a) => var a -> var a -> Thread m var ()
-swap var1 var2 = do
-  val1 <- get var1
-  val2 <- get var2
-  set var1 val2
-  set var2 val1
+-- swap :: (Monad m, Typeable a) => var a -> var a -> Thread m var ()
+-- swap var1 var2 = do
+--   val1 <- get var1
+--   val2 <- get var2
+--   set var1 val2
+--   set var2 val1
 
-prog :: Monad m => Thread m var ((Int, Int), (String, String))
-prog = do
-  intVar1 <- createFullVar 1
-  intVar2 <- createFullVar 2
-  strVar1 <- createFullVar "bejbe"
-  strVar2 <- createFullVar "szpadel"
-  swap intVar1 intVar2
-  fork $ swap intVar1 intVar2
-  swap strVar1 strVar2
-  fork $ swap strVar1 strVar2
-  intVal1 <- get intVar1
-  intVal2 <- get intVar2
-  strVal1 <- get strVar1
-  strVal2 <- get strVar2
-  return ((intVal1, intVal2), (strVal1, strVal2))
+-- prog :: Monad m => Thread m var ((Int, Int), (String, String))
+-- prog = do
+--   intVar1 <- createFullVar 1
+--   intVar2 <- createFullVar 2
+--   strVar1 <- createFullVar "bejbe"
+--   strVar2 <- createFullVar "szpadel"
+--   swap intVar1 intVar2
+--   fork $ swap intVar1 intVar2
+--   swap strVar1 strVar2
+--   fork $ swap strVar1 strVar2
+--   intVal1 <- get intVar1
+--   intVal2 <- get intVar2
+--   strVal1 <- get strVar1
+--   strVal2 <- get strVar2
+--   return ((intVal1, intVal2), (strVal1, strVal2))
 
 sleep :: MonadIO m => m ()
 sleep = liftIO $ randomRIO (0, 300000) >>= threadDelay
-  
-phil :: Monad m => Int -> var () -> var () -> Thread m var ()
-phil n leftFork rightFork = forever $ do
-    log $ show n ++ " is awaiting"
-    yield
-    get leftFork
-    log $ show n ++ " took left fork"
-    yield
-    get rightFork
-    log $ show n ++ " took right fork"
-    yield
-    set leftFork ()
-    set rightFork ()
-    log $ show n ++ " put forks"
-    yield
-    
-runPhil :: Monad m => Int -> Thread m var ()
-runPhil n = do
-    forks <- replicateM n $ createFullVar ()
-    forM_ [1..n] $ \i -> fork $ phil i (forks !! (i - 1)) (forks !! (i `mod` n))
 
 atomicPrint :: MVar () -> String -> IO ()
 atomicPrint var str = do
@@ -129,8 +115,8 @@ runIO :: Thread IO MVar a -> IO ()
 runIO action = do
   printLock <- newMVar ()
   runIO' printLock action
-  where runIO' printLock action = do
-          inst <- runFreeT action
+  where runIO' printLock a = do
+          inst <- runFreeT a
           case inst of
             Free (CreateEmptyVar cont) -> do
               var <- newEmptyMVar
@@ -151,7 +137,7 @@ runIO action = do
               ap str
               recurse cont
             Free (Fork cont1 cont2) -> do
-              forkIO $ recurse cont2
+              _ <- forkIO $ recurse cont2
               recurse cont1
             Free End -> return ()
             Pure _ -> return ()
@@ -168,8 +154,8 @@ verboseRunIO :: Thread IO MVar a -> IO ()
 verboseRunIO action = do
   printLock <- newMVar ()
   verboseRunIO' printLock action
-  where verboseRunIO' printLock action = do
-          instr <- runFreeT action
+  where verboseRunIO' printLock a = do
+          instr <- runFreeT a
           case instr of
             Free (CreateEmptyVar cont) -> do
               var <- newEmptyMVar
@@ -376,13 +362,10 @@ singleStep t active blocked = do
     Pure _ -> return (active, blocked)
 
 data Stream a = Stream a (Stream a)
-
-repeatS x = Stream x (repeatS x)
-
-newtype Choice = Choice (Int -> Int)
-
+type Choice = Int -> Int
 type Interleaving = Stream Choice
 
+choose :: Int -> [a] -> (a, [a])
 choose n lst = (lst !! n, take n lst ++ drop (n+1) lst)
 
 data RunResult = Deadlock | AllExit | LimitReached deriving (Eq, Show)
@@ -404,94 +387,69 @@ runWithInterleaving fs maxSteps t = go fs maxSteps t [] M.empty
               case ready' of
                 [] -> if M.null blocked' then return AllExit else return Deadlock
                 _ -> do
-                  let (Stream (Choice f) fs') = fs
+                  let (Stream f fs') = fs
                   let (wrappedChosen, rest) = choose (f (length ready')) ready'
                   case wrappedChosen of
                     ErasedTypeThread chosen -> go fs' (maxSteps-1) chosen rest blocked'
 
-getResultAndLog :: PureThread a -> Interleaving -> Int -> (RunResult, [String])
-getResultAndLog prog interleaving limit = runPureMonad $ 
-                                          runWithInterleaving interleaving limit prog
-
-
-printPhilResult f limit = do
-  let (result, logs) = getResultAndLog (runPhil 5) (repeatS (Choice f)) limit
-  putStrLn (intercalate "\n" logs)
-  print result
-
+choices :: [a] -> [(a, [a])]
 choices lst = map (\n -> choose n lst) [0..length lst - 1]
-
-allPermutations []  = [[]]
-allPermutations lst = [x:ys | (x, xs) <- choices lst, ys <- allPermutations xs]
-        
-runAllInterleavings :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m))) =>
-                       Thread m (SVar m) a ->
-                       Int ->
-                       m [RunResult]
-runAllInterleavings t maxSteps = go [wrapThread t] M.empty maxSteps
-  where go :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m))) =>
-              ThreadList m (SVar m) ->
-              BlockedMap m (SVar m) ->
-              Int ->
-              m [RunResult]
-        go ready blocked maxSteps = do
-          case maxSteps of
-            0 -> return [LimitReached]
-            _ -> case ready of
-              [] -> if M.null blocked then return [AllExit] else return [Deadlock]
-              _  -> liftM concat $ flip mapM (choices ready) $ \(wrappedChosen, rest) ->
-                case wrappedChosen of
-                  ErasedTypeThread chosen -> do
-                    (ready', blocked') <- singleStep chosen rest blocked
-                    go ready' blocked' (maxSteps-1)
-
-doesntDeadlock :: PureThread a -> Int -> Bool
-doesntDeadlock prog maxSteps = all (/= Deadlock) $ 
-                               fst $
-                               runPureMonad $
-                               runAllInterleavings prog maxSteps
 
 type M = PureMonadTransformer []
 type T = Thread M (SVar M)
 type TL = ThreadList M (SVar M)
 type TM = BlockedMap M (SVar M)
 
-allRuns :: T a -> Int -> [(RunResult, [String])]
-allRuns t maxSteps = runPureMonadT $ go [wrapThread t] M.empty maxSteps
-  where go :: TL -> TM -> Int -> M RunResult
-        go ready blocked maxSteps = case maxSteps of
+class Monad m => ListAtBottom m where
+  liftList :: [a] -> m a
+
+instance ListAtBottom [] where
+  liftList = id
+
+instance (MonadTrans t, ListAtBottom m, Monad (t m)) => ListAtBottom (t m) where
+  liftList = lift . liftList
+
+maybeTrace f g x y = if f x then trace (g x) y else y
+
+
+allRuns :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m)), ListAtBottom m) =>
+           Thread m (SVar m) a ->
+           Int ->
+           m RunResult
+allRuns t maxSteps = go [wrapThread t] M.empty maxSteps
+  where go :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m)), ListAtBottom m) =>
+              ThreadList m (SVar m) ->
+              BlockedMap m (SVar m) ->
+              Int ->
+              m RunResult
+        go ready blocked maxSteps = maybeTrace (> 7) (\n -> take (n-7) (repeat 'x')) maxSteps $ case maxSteps of
           0 -> return LimitReached
           _ -> case ready of
             [] -> if M.null blocked then return AllExit else return Deadlock
             _ -> do
-              (wrapedChosen, rest) <- (lift . lift) (choices ready)
+              (wrapedChosen, rest) <- liftList (choices ready)
               case wrapedChosen of
                 ErasedTypeThread chosen -> do
                   (ready', blocked') <- singleStep chosen rest blocked
                   go ready' blocked' (maxSteps-1)
 
-findDeadlock :: T a -> Int -> Maybe [String]
-findDeadlock t maxSteps = fmap snd $ find ((== Deadlock) . fst) $ allRuns t maxSteps 
+-- -- findDeadlock :: T a -> Int -> Maybe [String]
+findDeadlock t maxSteps = fmap snd $ find ((== Deadlock) . fst) $ runPureMonadT $ allRuns t maxSteps 
 
-par2 :: (a -> b -> c) -> (a -> b -> c)
-par2 f x y = x `par` y `par` f x y
+-- -- par2 :: (a -> b -> c) -> (a -> b -> c)
+-- -- par2 f x y = x `par` y `par` f x y
 
-parMap :: (a -> b) -> [a] -> [b]
-parMap _ []     = []
-parMap f (x:xs) = par2 (:) (f x) (parMap f xs)
+-- -- parMap :: (a -> b) -> [a] -> [b]
+-- -- parMap _ []     = []
+-- -- parMap f (x:xs) = par2 (:) (f x) (parMap f xs)
 
-parFind :: (a -> Bool) -> [a] -> Maybe a
-parFind f xs = g pairs
-  where pairs = parMap (\x -> (f x, x)) xs
-        g [] = Nothing
-        g ((True, y):ys) = Just y
-        g ((False,_):ys) = g ys
+-- -- parFind :: (a -> Bool) -> [a] -> Maybe a
+-- -- parFind f xs = g pairs
+-- --   where pairs = parMap (\x -> (f x, x)) xs
+-- --         g [] = Nothing
+-- --         g ((True, y):ys) = Just y
+-- --         g ((False,_):ys) = g ys
 
-parFindDeadlock :: T a -> Int -> Maybe [String]
-parFindDeadlock t maxSteps = fmap snd $ parFind ((== Deadlock) . fst) $ allRuns t maxSteps
+-- -- parFindDeadlock :: T a -> Int -> Maybe [String]
+-- -- parFindDeadlock t maxSteps = fmap snd $ parFind ((== Deadlock) . fst) $ allRuns t maxSteps
 
-main = do
-  printPhilResult (\n -> max (n-2) 0) 1000
-  putStrLn ""
-  printPhilResult (\n -> max (n-1) 0) 1000
-  print $ parFindDeadlock (runPhil 4) 20
