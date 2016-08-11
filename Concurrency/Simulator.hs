@@ -269,10 +269,12 @@ roundRobin t = go (singleton t)
 
 data ErasedTypeThread m var = forall a. ErasedTypeThread (Thread m var a)
 
+wrapThread :: Thread m var a -> ErasedTypeThread m var
 wrapThread t = ErasedTypeThread t
 
 data ErasedTypeVar var = forall a. ErasedTypeVar (var a)
 
+wrapVar :: var a -> ErasedTypeVar var
 wrapVar v = ErasedTypeVar v
 
 instance Eq (ErasedTypeVar Var) where
@@ -347,7 +349,11 @@ choose n lst = (lst !! n, take n lst ++ drop (n+1) lst)
 
 data RunResult = Deadlock | AllExit | LimitReached deriving (Eq, Show)
 
-runWithInterleaving :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m))) => Interleaving -> Int -> Thread m (SVar m) a -> m RunResult
+runWithInterleaving :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m))) =>
+                       Interleaving ->
+                       Int ->
+                       Thread m (SVar m) a ->
+                       m RunResult
 runWithInterleaving fs maxSteps t = go fs maxSteps t [] M.empty
   where go :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m))) =>
               Interleaving ->
@@ -386,6 +392,7 @@ instance ListAtBottom [] where
 instance (MonadTrans t, ListAtBottom m, Monad (t m)) => ListAtBottom (t m) where
   liftList = lift . liftList
 
+maybeTrace :: (a -> Bool) -> (a -> String) -> a -> b -> b
 maybeTrace f g x y = if f x then trace (g x) y else y
 
 
