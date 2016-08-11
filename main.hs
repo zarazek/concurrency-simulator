@@ -5,6 +5,7 @@ import Concurrency.Simulator (Thread, PureThread, createFullVar, get, set, log, 
                               findDeadlock)
 import Control.Monad (forever, replicateM, forM_)
 import Data.List (intercalate)
+import System.Environment (getArgs)
 
 phil :: Monad m => Int -> var () -> var () -> Thread m var ()
 phil n leftFork rightFork = forever $ do
@@ -36,7 +37,10 @@ printPhilResult f limit = do
 
 
 main = do
-  printPhilResult (\n -> max (n-2) 0) 1000
-  putStrLn ""
-  printPhilResult (\n -> max (n-1) 0) 1000
-  print $ findDeadlock (runPhil 4) 20
+  -- printPhilResult (\n -> max (n-2) 0) 1000
+  -- putStrLn ""
+  -- printPhilResult (\n -> max (n-1) 0) 1000
+  [numPhilsStr, numStepsStr] <- getArgs
+  let numPhils = read numPhilsStr
+  let numSteps = read numStepsStr
+  print $ findDeadlock (runPhil numPhils) numSteps
