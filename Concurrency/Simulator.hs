@@ -397,7 +397,7 @@ allRuns t maxSteps = go [wrapThread t] M.empty maxSteps
               BlockedMap m (SVar m) ->
               Int ->
               m RunResult
-        go ready blocked maxSteps = maybeTrace (> 7) (\n -> take (n-7) (repeat 'x')) maxSteps $ case maxSteps of
+        go ready blocked maxSteps = maybeTrace (> 7) (\n -> replicate (n-7) 'x') maxSteps $ case maxSteps of
           0 -> return LimitReached
           _ -> case ready of
             [] -> if M.null blocked then return AllExit else return Deadlock
