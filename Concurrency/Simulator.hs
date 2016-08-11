@@ -34,7 +34,6 @@ data ThreadF var next = forall a. Typeable a => CreateEmptyVar (var a -> next)
                       | Yield next
                       | Log String next
                       | Fork next next
-                      | End
 
 instance Functor (ThreadF var) where
   fmap f (CreateEmptyVar cont) = CreateEmptyVar (f . cont)
@@ -44,7 +43,6 @@ instance Functor (ThreadF var) where
   fmap f (Yield cont) = Yield (f cont)
   fmap f (Log str cont) = Log str (f cont)
   fmap f (Fork cont1 cont2) = Fork (f cont1) (f cont2)
-  fmap _ End = End 
 
 type Thread m var = FreeT (ThreadF var) m
 
@@ -66,9 +64,6 @@ yield = liftF (Yield ())
 log :: Monad m => String -> Thread m var ()
 log str = liftF (Log str ())
 
-end :: (Monad m, Typeable a) => Thread m var a
-end = liftF End
-
 cFork :: Monad m => Thread m var Bool
 cFork = liftF (Fork False True)
 
@@ -77,7 +72,7 @@ fork thread = do
   child <- cFork
   when child $ do
     _ <- thread
-    end
+    return ()
 
 sleep :: MonadIO m => m ()
 sleep = liftIO $ randomRIO (0, 300000) >>= threadDelay
@@ -116,7 +111,6 @@ runIO action = do
             Free (Fork cont1 cont2) -> do
               _ <- forkIO $ recurse cont2
               recurse cont1
-            Free End -> return ()
             Pure _ -> return ()
           where ap = atomicPrint printLock
                 recurse = runIO' printLock
@@ -160,7 +154,6 @@ verboseRunIO action = do
               newThreadId <- forkIO $ recurse cont2
               ap ("fork: " ++ show newThreadId)
               recurse cont1
-            Free End -> ap "end"
             Pure _ -> ap "return"
           where ap str = do
                   threadId <- myThreadId
@@ -264,7 +257,6 @@ roundRobin t = go (singleton t)
               Free (Yield cont) -> go (ts' |> cont)
               Free (Log str cont) -> putLog str >> go (cont <| ts')
               Free (Fork cont1 cont2) -> go (cont1 <| ( ts' |> cont2))
-              Free End -> go ts'
               Pure _ -> go ts'
 
 data ErasedTypeThread m var = forall a. ErasedTypeThread (Thread m var a)
@@ -337,7 +329,6 @@ singleStep t active blocked = do
       -- return (wrapThread cont : active, blocked)
       singleStep cont active blocked
     Free (Fork cont1 cont2) -> return (wrapThread cont1 : wrapThread cont2 : active, blocked)
-    Free End -> return (active, blocked)
     Pure _ -> return (active, blocked)
 
 data Stream a = Stream a (Stream a)
