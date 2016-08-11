@@ -79,29 +79,6 @@ fork thread = do
     _ <- thread
     end
 
--- swap :: (Monad m, Typeable a) => var a -> var a -> Thread m var ()
--- swap var1 var2 = do
---   val1 <- get var1
---   val2 <- get var2
---   set var1 val2
---   set var2 val1
-
--- prog :: Monad m => Thread m var ((Int, Int), (String, String))
--- prog = do
---   intVar1 <- createFullVar 1
---   intVar2 <- createFullVar 2
---   strVar1 <- createFullVar "bejbe"
---   strVar2 <- createFullVar "szpadel"
---   swap intVar1 intVar2
---   fork $ swap intVar1 intVar2
---   swap strVar1 strVar2
---   fork $ swap strVar1 strVar2
---   intVal1 <- get intVar1
---   intVal2 <- get intVar2
---   strVal1 <- get strVar1
---   strVal2 <- get strVar2
---   return ((intVal1, intVal2), (strVal1, strVal2))
-
 sleep :: MonadIO m => m ()
 sleep = liftIO $ randomRIO (0, 300000) >>= threadDelay
 
@@ -435,21 +412,3 @@ allRuns t maxSteps = go [wrapThread t] M.empty maxSteps
 
 findDeadlock :: T a -> Int -> Maybe [String]
 findDeadlock t maxSteps = fmap snd $ find ((== Deadlock) . fst) $ runPureMonadT $ allRuns t maxSteps 
-
--- -- par2 :: (a -> b -> c) -> (a -> b -> c)
--- -- par2 f x y = x `par` y `par` f x y
-
--- -- parMap :: (a -> b) -> [a] -> [b]
--- -- parMap _ []     = []
--- -- parMap f (x:xs) = par2 (:) (f x) (parMap f xs)
-
--- -- parFind :: (a -> Bool) -> [a] -> Maybe a
--- -- parFind f xs = g pairs
--- --   where pairs = parMap (\x -> (f x, x)) xs
--- --         g [] = Nothing
--- --         g ((True, y):ys) = Just y
--- --         g ((False,_):ys) = g ys
-
--- -- parFindDeadlock :: T a -> Int -> Maybe [String]
--- -- parFindDeadlock t maxSteps = fmap snd $ parFind ((== Deadlock) . fst) $ allRuns t maxSteps
-
