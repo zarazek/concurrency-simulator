@@ -433,7 +433,7 @@ allRuns t maxSteps = go [wrapThread t] M.empty maxSteps
                   (ready', blocked') <- singleStep chosen rest blocked
                   go ready' blocked' (maxSteps-1)
 
--- -- findDeadlock :: T a -> Int -> Maybe [String]
+findDeadlock :: T a -> Int -> Maybe [String]
 findDeadlock t maxSteps = fmap snd $ find ((== Deadlock) . fst) $ runPureMonadT $ allRuns t maxSteps 
 
 -- -- par2 :: (a -> b -> c) -> (a -> b -> c)
