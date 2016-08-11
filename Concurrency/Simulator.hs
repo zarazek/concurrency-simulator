@@ -326,8 +326,8 @@ singleStep t active blocked = do
     Free (Yield cont) -> return (wrapThread cont : active, blocked)
     Free (Log str cont) -> do
       putLog str
-      -- return (wrapThread cont : active, blocked)
-      singleStep cont active blocked
+      return (wrapThread cont : active, blocked)
+      -- singleStep cont active blocked
     Free (Fork cont1 cont2) -> return (wrapThread cont1 : wrapThread cont2 : active, blocked)
     Pure _ -> return (active, blocked)
 

@@ -1,5 +1,5 @@
 import Prelude hiding (log)
-import Concurrency.Simulator (Thread, PureThread, createFullVar, get, set, log, fork, yield,
+import Concurrency.Simulator (Thread, PureThread, createFullVar, get, set, log, fork,
                               runPureMonad, 
                               Stream(..), Interleaving, RunResult, runWithInterleaving,
                               findDeadlock)
@@ -9,17 +9,13 @@ import Data.List (intercalate)
 phil :: Monad m => Int -> var () -> var () -> Thread m var ()
 phil n leftFork rightFork = forever $ do
     log $ show n ++ " is awaiting"
-    yield
     get leftFork
     log $ show n ++ " took left fork"
-    yield
     get rightFork
     log $ show n ++ " took right fork"
-    yield
     set leftFork ()
     set rightFork ()
     log $ show n ++ " put forks"
-    yield
     
 runPhil :: Monad m => Int -> Thread m var ()
 runPhil n = do
