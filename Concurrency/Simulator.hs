@@ -18,7 +18,7 @@ import Data.Sequence (singleton, viewl, ViewL(..), (<|), (|>))
 import Data.IORef
 import qualified Data.Map.Strict as M
 import Control.Monad.Trans.Class
-import qualified Control.Monad.State as S
+import qualified Control.Monad.State.Strict as S
 import qualified Control.Monad.Writer as W
 import Data.Functor.Identity (Identity, runIdentity)
 import Data.List (find)
@@ -202,26 +202,36 @@ fromOpaque (Opaque x) = unsafeCoerce x
 
 newtype Var a =  Var Int
 type BindingsMap = M.Map Int (Maybe Opaque)
-data Bindings = Bindings BindingsMap Int
+data Bindings = Bindings !BindingsMap !Int
 
 emptyBindings :: Bindings
 emptyBindings = Bindings M.empty 0
 
-getValue :: BindingsMap -> Int -> Maybe a
-getValue binds var = case M.lookup var binds of
-  Nothing -> error "read of unbound variable"
-  Just maybeOpaque -> case maybeOpaque of
-                     Nothing -> Nothing
-                     Just opaque -> Just (fromOpaque opaque)
+newEmptyVariable :: Bindings -> (Var a, Bindings)
+newEmptyVariable (Bindings map next) = (Var next, Bindings newMap newNext)
+  where newMap = M.insert next Nothing map
+        newNext = next + 1
 
-setValue :: BindingsMap -> Int -> Maybe a -> BindingsMap
-setValue binds var new = case M.lookup var binds of
-  Nothing -> error "write of unbound variable"
-  Just old -> case (old, new) of
-                     (Nothing, Nothing) -> error "clear of empty variable"
-                     (Nothing, Just val) -> M.adjust (\_ -> Just (toOpaque val)) var binds
-                     (Just _, Nothing) -> M.adjust (\_ -> Nothing) var binds
-                     (Just _, Just _) -> error "set of set variable"
+newFullVariable :: a -> Bindings -> (Var a, Bindings)
+newFullVariable val (Bindings map next) = (Var next, Bindings newMap newNext)
+  where newMap = M.insert next (Just (toOpaque val)) map
+        newNext = next + 1
+
+getValue :: Var a -> Bindings -> Maybe a
+getValue (Var var) (Bindings map _) = case M.lookup var map of
+  Nothing -> error "read of unbound variable"
+  Just Nothing -> Nothing
+  Just (Just val) -> Just (fromOpaque val)
+
+setValue :: Var a -> Maybe a -> Bindings -> Bindings
+setValue (Var var) new (Bindings map next) = Bindings (M.alter f var map) next
+  where f prev = case prev of
+                   Nothing -> error "write of unbound variable"
+                   Just old -> case (old, new) of
+                                 (Nothing, Nothing) -> error "clear of empty variable"
+                                 (Nothing, Just val) -> Just (Just (toOpaque val))
+                                 (Just _, Nothing) -> Just Nothing
+                                 (Just _, Just _) -> error "set of set variable"
 
 -- type PureMonadTransformer m = S.StateT Bindings (W.WriterT [String] m)
 type PureMonadTransformer m = W.WriterT [String] (S.StateT Bindings m)
@@ -237,14 +247,10 @@ runPureMonad = runIdentity . runPureMonadT
 
 instance Monad m => MonadSharedState (PureMonadTransformer m) where
   type SVar (PureMonadTransformer m) = Var
-  newEmptySVar = S.get >>= \(Bindings map next) -> do
-    S.put (Bindings (M.insert next Nothing map) (next + 1))
-    return (Var next)
-  newFullSVar val = S.get >>= \(Bindings map next) -> do
-    S.put (Bindings (M.insert next (Just (toOpaque val)) map) (next + 1))
-    return (Var next)
-  readSVar (Var var) = S.gets (\(Bindings map _) -> getValue map var)
-  writeSVar (Var var) val = S.modify (\(Bindings map next) -> Bindings (setValue map var val) next)
+  newEmptySVar = S.state newEmptyVariable
+  newFullSVar val = S.state (newFullVariable val)
+  readSVar var = S.gets (getValue var)
+  writeSVar var val = S.modify (setValue var val)
   putLog str = W.tell [str]
 
 roundRobin :: MonadSharedState m => Thread m (SVar m) a -> m ()
@@ -306,9 +312,7 @@ addToMultimap map var thr = M.alter f (wrapVar var) map
 removeFromMultimap :: Ord (ErasedTypeVar var) => BlockedMap m var -> var a -> (BlockedMap m var, ThreadList m var)
 removeFromMultimap map var = (newMap, thrs)
   where newMap = M.delete wrappedVar map
-        thrs = case M.lookup wrappedVar map of
-          Nothing -> []
-          Just thrs -> thrs
+        thrs = maybe [] id (M.lookup wrappedVar map)
         wrappedVar = wrapVar var
         
 singleStep :: (MonadSharedState m, Ord (ErasedTypeVar (SVar m))) =>
