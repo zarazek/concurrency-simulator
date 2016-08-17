@@ -22,6 +22,7 @@ import qualified Control.Monad.State.Strict as S
 import qualified Control.Monad.Writer as W
 import Data.Functor.Identity (Identity, runIdentity)
 import Data.List (find)
+import qualified Data.DList as DL
 import Unsafe.Coerce (unsafeCoerce)
 
 import Debug.Trace (trace)
@@ -360,7 +361,12 @@ type Choice = Int -> Int
 type Interleaving = Stream Choice
 
 choose :: Int -> [a] -> (a, [a])
-choose n lst = (lst !! n, take n lst ++ drop (n+1) lst)
+choose n lst = go lst n []
+  where go lst n soFar = case lst of
+                           [] -> error "empty list"
+                           x:xs -> case n of
+                                     0 -> (x, reverse soFar ++ xs)
+                                     _ -> go xs (n-1) (x:soFar)
 
 data RunResult = Deadlock | AllExit | LimitReached deriving (Eq, Show)
 
@@ -390,8 +396,14 @@ runWithInterleaving fs maxSteps t = go fs maxSteps t [] M.empty
                   case wrappedChosen of
                     ErasedTypeThread chosen -> go fs' (maxSteps-1) chosen rest blocked'
 
+recurseL :: (b -> a -> [a] -> b) -> b -> [a] -> b
+recurseL f start lst = go start lst
+  where go acc [] = acc
+        go acc (x:xs) = go (f acc x xs) xs
+
 choices :: [a] -> [(a, [a])]
-choices lst = map (\n -> choose n lst) [0..length lst - 1]
+choices = reverse . snd . recurseL f (DL.empty, [])
+  where f (prefix, res) x xs = (DL.snoc prefix x, (x, DL.apply prefix xs) : res)
 
 type M = PureMonadTransformer []
 type T = Thread M (SVar M)

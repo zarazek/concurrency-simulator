@@ -17,12 +17,12 @@ cabal-version:       >=1.10
 library
   exposed-modules:     Concurrency.Simulator
   ghc-options:         -O2 -threaded -rtsopts
-  build-depends:       base, free, transformers, random, containers, mtl
+  build-depends:       base, free, transformers, random, containers, mtl, dlist
   default-language:    Haskell2010
 
 executable benchmark
   main-is:             main.hs
   ghc-options:         -O2 -threaded -rtsopts
-  build-depends:       base, free, transformers, random, containers, mtl
+  build-depends:       base, free, transformers, random, containers, mtl, dlist
   default-language:    Haskell2010
  
