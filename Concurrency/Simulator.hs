@@ -14,7 +14,6 @@ import Control.Monad.IO.Class
 import System.Random
 import Control.Concurrent (forkIO, myThreadId, threadDelay)
 import Control.Concurrent.MVar
-import Data.Typeable
 import Data.Sequence (singleton, viewl, ViewL(..), (<|), (|>))
 import Data.IORef
 import qualified Data.Map.Strict as M
@@ -22,15 +21,15 @@ import Control.Monad.Trans.Class
 import qualified Control.Monad.State as S
 import qualified Control.Monad.Writer as W
 import Data.Functor.Identity (Identity, runIdentity)
-import Data.Dynamic
 import Data.List (find)
+import Unsafe.Coerce (unsafeCoerce)
 
 import Debug.Trace (trace)
 
-data ThreadF var next = forall a. Typeable a => CreateEmptyVar (var a -> next)
-                      | forall a. Typeable a => CreateFullVar a (var a -> next)
-                      | forall a. Typeable a => Get (var a) (a -> next)
-                      | forall a. Typeable a => Set (var a) a next
+data ThreadF var next = forall a. CreateEmptyVar (var a -> next)
+                      | forall a. CreateFullVar a (var a -> next)
+                      | forall a. Get (var a) (a -> next)
+                      | forall a. Set (var a) a next
                       | Yield next
                       | Log String next
                       | Fork next next
@@ -46,16 +45,16 @@ instance Functor (ThreadF var) where
 
 type Thread m var = FreeT (ThreadF var) m
 
-createEmptyVar :: (Monad m, Typeable a) => Thread m var (var a)
+createEmptyVar :: Monad m => Thread m var (var a)
 createEmptyVar = liftF (CreateEmptyVar id)
 
-createFullVar :: (Monad m, Typeable a) => a -> Thread m var (var a)
+createFullVar :: Monad m => a -> Thread m var (var a)
 createFullVar val = liftF (CreateFullVar val id)
 
-get :: (Monad m, Typeable a) => var a -> Thread m var a
+get :: Monad m => var a -> Thread m var a
 get var = liftF (Get var id)
 
-set :: (Monad m, Typeable a) => var a -> a -> Thread m var ()
+set :: Monad m => var a -> a -> Thread m var ()
 set var val = liftF (Set var val ())
 
 yield :: Monad m => Thread m var ()
@@ -67,7 +66,7 @@ log str = liftF (Log str ())
 cFork :: Monad m => Thread m var Bool
 cFork = liftF (Fork False True)
 
-fork :: (Monad m, Typeable a) => Thread m var a -> Thread m var ()
+fork :: Monad m => Thread m var a -> Thread m var ()
 fork thread = do
   child <- cFork
   when child $ do
@@ -115,57 +114,72 @@ runIO action = do
           where ap = atomicPrint printLock
                 recurse = runIO' printLock
 
-showType :: Typeable a => a -> String
-showType = show . typeOf
+data WMVar a = WMVar (MVar a) Int
 
-showArgType :: Typeable a => a -> String
-showArgType = show . head . typeRepArgs . typeOf
+varName :: WMVar a -> String
+varName (WMVar _ i) = show i
 
-verboseRunIO :: Thread IO MVar a -> IO ()
+getNextIdx :: IORef Int -> IO Int
+getNextIdx next = atomicModifyIORef' next (\n -> (n+1, n))
+
+newEmptyWMVar :: IORef Int -> IO (WMVar a)
+newEmptyWMVar next = WMVar <$> newEmptyMVar <*> getNextIdx next
+
+newFullWMVar :: IORef Int -> a -> IO (WMVar a)
+newFullWMVar next val = WMVar <$> newMVar val <*> getNextIdx next
+
+takeWMVar :: WMVar a -> IO a
+takeWMVar (WMVar var _) = takeMVar var
+
+putWMVar :: WMVar a -> a -> IO ()
+putWMVar (WMVar var _ ) val = putMVar var val
+
+verboseRunIO :: Thread IO WMVar a -> IO ()
 verboseRunIO action = do
   printLock <- newMVar ()
-  verboseRunIO' printLock action
-  where verboseRunIO' printLock a = do
+  nextVarId <- newIORef 0
+  verboseRunIO' printLock nextVarId action
+  where verboseRunIO' printLock nextVarId a = do
           instr <- runFreeT a
           case instr of
             Free (CreateEmptyVar cont) -> do
-              var <- newEmptyMVar
-              ap ("new empty " ++ showArgType var ++ " var")
-              recurse (cont var)
+              var <- newEmptyWMVar nextVarId
+              ap ("new empty var " ++ varName var)
+              recur (cont var)
             Free (CreateFullVar val cont) -> do
-              var <- newMVar val
-              ap ("new full " ++ showArgType var ++ " var")
-              recurse (cont var)
+              var <- newFullWMVar nextVarId val
+              ap ("new full var " ++ varName var)
+              recur (cont var)
             Free (Get var cont) -> do
-              val <- takeMVar var
-              ap ("taken " ++ showType val ++ " val")
-              recurse (cont val)
+              val <- takeWMVar var
+              ap ("taken var " ++ varName var)
+              recur (cont val)
             Free (Set var val cont) -> do
-              putMVar var val
-              ap ("put " ++ showType val ++ " val")
-              recurse cont
+              putWMVar var val
+              ap ("put var " ++ varName var)
+              recur cont
             Free (Yield cont) -> do
               sleep
-              recurse cont
+              recur cont
             Free (Log str cont) -> do
               ap str
-              recurse cont
+              recur cont
             Free (Fork cont1 cont2) -> do
-              newThreadId <- forkIO $ recurse cont2
+              newThreadId <- forkIO $ recur cont2
               ap ("fork: " ++ show newThreadId)
-              recurse cont1
+              recur cont1
             Pure _ -> ap "return"
           where ap str = do
                   threadId <- myThreadId
                   atomicPrint printLock (show threadId ++ ": " ++ str)
-                recurse = verboseRunIO' printLock
+                recur = verboseRunIO' printLock nextVarId
 
 class Monad m => MonadSharedState m where
   type SVar m :: * -> *
-  newEmptySVar :: Typeable a => m (SVar m a)
-  newFullSVar :: Typeable a => a -> m (SVar m a)
-  readSVar :: Typeable a => SVar m a -> m (Maybe a)
-  writeSVar :: Typeable a => SVar m a -> Maybe a -> m ()
+  newEmptySVar :: m (SVar m a)
+  newFullSVar ::  a -> m (SVar m a)
+  readSVar :: SVar m a -> m (Maybe a)
+  writeSVar :: SVar m a -> Maybe a -> m ()
   putLog :: String -> m ()
 
 newtype MaybeRef a = MaybeRef (IORef (Maybe a))
@@ -178,28 +192,34 @@ instance MonadSharedState IO where
   writeSVar (MaybeRef var) val  = writeIORef var val
   putLog = putStrLn
 
+data Opaque = forall a. Opaque a
+
+toOpaque :: a -> Opaque
+toOpaque x = Opaque x
+
+fromOpaque :: Opaque -> a
+fromOpaque (Opaque x) = unsafeCoerce x
+
 newtype Var a =  Var Int
-type BindingsMap = M.Map Int (Maybe Dynamic)
+type BindingsMap = M.Map Int (Maybe Opaque)
 data Bindings = Bindings BindingsMap Int
 
 emptyBindings :: Bindings
 emptyBindings = Bindings M.empty 0
 
-getValue :: Typeable a => BindingsMap -> Int -> Maybe a
+getValue :: BindingsMap -> Int -> Maybe a
 getValue binds var = case M.lookup var binds of
   Nothing -> error "read of unbound variable"
-  Just maybeDyn -> case maybeDyn of
+  Just maybeOpaque -> case maybeOpaque of
                      Nothing -> Nothing
-                     Just dyn -> case fromDynamic dyn of
-                                   Nothing -> error "read of variable of invalid type"
-                                   Just val -> Just val
+                     Just opaque -> Just (fromOpaque opaque)
 
-setValue :: Typeable a => BindingsMap -> Int -> Maybe a -> BindingsMap
+setValue :: BindingsMap -> Int -> Maybe a -> BindingsMap
 setValue binds var new = case M.lookup var binds of
   Nothing -> error "write of unbound variable"
   Just old -> case (old, new) of
                      (Nothing, Nothing) -> error "clear of empty variable"
-                     (Nothing, Just val) -> M.adjust (\_ -> Just (toDyn val)) var binds
+                     (Nothing, Just val) -> M.adjust (\_ -> Just (toOpaque val)) var binds
                      (Just _, Nothing) -> M.adjust (\_ -> Nothing) var binds
                      (Just _, Just _) -> error "set of set variable"
 
@@ -221,7 +241,7 @@ instance Monad m => MonadSharedState (PureMonadTransformer m) where
     S.put (Bindings (M.insert next Nothing map) (next + 1))
     return (Var next)
   newFullSVar val = S.get >>= \(Bindings map next) -> do
-    S.put (Bindings (M.insert next (Just (toDyn val)) map) (next + 1))
+    S.put (Bindings (M.insert next (Just (toOpaque val)) map) (next + 1))
     return (Var next)
   readSVar (Var var) = S.gets (\(Bindings map _) -> getValue map var)
   writeSVar (Var var) val = S.modify (\(Bindings map next) -> Bindings (setValue map var val) next)
